@@ -1,82 +1,71 @@
-
 import streamlit as st
 import pandas as pd
 import folium
 from folium.plugins import PolyLineTextPath
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderUnavailable
+from geopy.distance import geodesic
 
-# Funkcja do geolokalizacji miejscowości
+# Wczytaj istniejące trasy z pliku CSV
 @st.cache_data
-def get_location(name):
-    geolocator = Nominatim(user_agent="mapa_polski_app")
-    try:
-        location = geolocator.geocode(name + ", Polska")
-        if location:
-            return location.latitude, location.longitude
-    except GeocoderUnavailable:
-        return None
-    return None
+def load_trasy():
+    df = pd.read_csv("trasy.csv")
+    return df
 
-# Wczytanie istniejących tras z pliku
-df_trasy = pd.read_csv("trasy.csv")
+trasy_df = load_trasy()
 
-st.title("🗺️ Mapa Polski – trasy i planowanie")
+# Funkcja pomocnicza do geokodowania nazw miejscowości
+@st.cache_data
+def geocode_city(city_name):
+    geolocator = Nominatim(user_agent="streamlit_app")
+    location = geolocator.geocode(city_name + ", Poland")
+    if location:
+        return location.latitude, location.longitude
+    return None, None
 
-# Pola do wpisania nowej trasy
-z_miasto = st.text_input("Z (miejsce startowe)")
-do_miasto = st.text_input("Do (miejsce docelowe)")
+st.set_page_config(page_title="Mapa Tras w Polsce", layout="wide")
+st.title("🚚 Interaktywna mapa tras transportowych w Polsce")
 
-# Sprawdzenie i pobranie współrzędnych
-nowa_trasa = None
-if z_miasto and do_miasto:
-    z_coord = get_location(z_miasto)
-    do_coord = get_location(do_miasto)
-    if z_coord and do_coord:
-        nowa_trasa = {
-            "start_nazwa": z_miasto,
-            "start_lat": z_coord[0],
-            "start_lon": z_coord[1],
-            "koniec_nazwa": do_miasto,
-            "koniec_lat": do_coord[0],
-            "koniec_lon": do_coord[1]
-        }
+# Wprowadź miejscowości
+col1, col2 = st.columns(2)
+with col1:
+    miejsce_z = st.text_input("Z (miejsce startowe)")
+with col2:
+    miejsce_do = st.text_input("Do (miejsce docelowe)")
 
-# Tworzenie mapy
+# Inicjalna mapa (pusta)
 mapa = folium.Map(location=[52.0, 19.0], zoom_start=6)
 
-# Rysowanie istniejących tras
-for _, row in df_trasy.iterrows():
-    folium.Marker([row.start_lat, row.start_lon], tooltip=row.start_nazwa, icon=folium.Icon(color="gray")).add_to(mapa)
-    folium.Marker([row.koniec_lat, row.koniec_lon], tooltip=row.koniec_nazwa, icon=folium.Icon(color="darkred")).add_to(mapa)
-    linia = folium.PolyLine(
-        locations=[[row.start_lat, row.start_lon], [row.koniec_lat, row.koniec_lon]],
-        color="gray",
-        weight=2,
-        opacity=0.6
-    )
-    linia.add_to(mapa)
+# Rysuj istniejące trasy jeśli wpisano Z i Do
+if miejsce_z and miejsce_do:
+    lat_z, lon_z = geocode_city(miejsce_z)
+    lat_do, lon_do = geocode_city(miejsce_do)
 
-# Rysowanie nowej trasy
-if nowa_trasa:
-    folium.Marker([nowa_trasa["start_lat"], nowa_trasa["start_lon"]],
-                  tooltip="Start: " + nowa_trasa["start_nazwa"],
-                  icon=folium.Icon(color="green")).add_to(mapa)
-    folium.Marker([nowa_trasa["koniec_lat"], nowa_trasa["koniec_lon"]],
-                  tooltip="Cel: " + nowa_trasa["koniec_nazwa"],
-                  icon=folium.Icon(color="red")).add_to(mapa)
-    nowa_linia = folium.PolyLine(
-        locations=[
-            [nowa_trasa["start_lat"], nowa_trasa["start_lon"]],
-            [nowa_trasa["koniec_lat"], nowa_trasa["koniec_lon"]]
-        ],
-        color="blue",
-        weight=5
-    )
-    nowa_linia.add_to(mapa)
-    # Dodanie strzałki (jako tekst na linii)
-    PolyLineTextPath(nowa_linia, "   ➤   ", repeat=True, offset=8, attributes={"fill": "blue", "font-weight": "bold"}).add_to(mapa)
+    if None in (lat_z, lon_z, lat_do, lon_do):
+        st.error("Nie można znaleźć jednej z lokalizacji. Upewnij się, że poprawnie wpisałeś miejscowości.")
+    else:
+        # Dodaj marker dla Z i Do
+        folium.Marker([lat_z, lon_z], tooltip=f"Start: {miejsce_z}", icon=folium.Icon(color='green')).add_to(mapa)
+        folium.Marker([lat_do, lon_do], tooltip=f"Cel: {miejsce_do}", icon=folium.Icon(color='red')).add_to(mapa)
 
-# Wyświetlenie mapy
-st_folium(mapa, width=700, height=500)
+        # Dodaj trasę główną
+        linia = folium.PolyLine(locations=[[lat_z, lon_z], [lat_do, lon_do]], color="blue", weight=5).add_to(mapa)
+        PolyLineTextPath(linia, "➡", repeat=True, offset=7, attributes={"fill": "blue", "font-weight": "bold", "font-size": "16"}).add_to(mapa)
+
+        # Szukaj najbliższych istniejących tras
+        nowa_start = (lat_z, lon_z)
+        nowa_end = (lat_do, lon_do)
+
+        for _, row in trasy_df.iterrows():
+            punkt_a = (row['lat_z'], row['lon_z'])
+            punkt_b = (row['lat_do'], row['lon_do'])
+
+            dist_a = geodesic(nowa_start, punkt_a).km
+            dist_b = geodesic(nowa_end, punkt_b).km
+
+            if dist_a < 50 or dist_b < 50:
+                folium.PolyLine(locations=[punkt_a, punkt_b], color="gray", weight=2, opacity=0.6).add_to(mapa)
+
+# Wyświetl mapę
+st_folium(mapa, width=1000, height=600)
+
